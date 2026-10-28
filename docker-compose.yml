@@ -1,7 +1,59 @@
+# Sobe o sistema inteiro:  docker compose up --build
+# Carrega os documentos:   docker compose exec ingestao python -m servicos.ingestao.carregar
 services:
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
 
-  # TAREFA 4: acrescente aqui os tres servicos (ingestao, recuperacao, geracao)
-  # depois de escrever um Dockerfile para cada um.
+  # Servico 1: API de ingestao (produtor da fila)
+  ingestao:
+    build: { context: ., dockerfile: servicos/ingestao/Dockerfile }
+    ports: ["8001:8001"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      ARQUIVO_INDICE: /dados/indice.json
+    volumes: ["dados:/dados"]
+    depends_on:
+      redis: { condition: service_healthy }
+
+  # Consumidor da fila: gera os embeddings e grava o indice no volume compartilhado
+  worker:
+    build: { context: ., dockerfile: servicos/ingestao/Dockerfile }
+    command: ["python", "-m", "servicos.ingestao.worker"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      ARQUIVO_INDICE: /dados/indice.json
+    volumes: ["dados:/dados"]
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  # Servico 2: recuperacao
+  recuperacao:
+    build: { context: ., dockerfile: servicos/recuperacao/Dockerfile }
+    ports: ["8002:8002"]
+    environment:
+      URL_INGESTAO: http://ingestao:8001
+    depends_on: [ingestao]
+
+  # Servico 3: geracao (chama o LLM). A chave nunca fica no codigo nem na imagem:
+  # o compose le o arquivo .env (se existir) ou as variaveis do terminal.
+  # Sem LLM_API_KEY, o LLM roda em MODO SIMULADO (offline).
+  geracao:
+    build: { context: ., dockerfile: servicos/geracao/Dockerfile }
+    ports: ["8003:8003"]
+    environment:
+      URL_RECUPERACAO: http://recuperacao:8002
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_API_URL: ${LLM_API_URL:-https://api.openai.com/v1/chat/completions}
+      LLM_MODELO: ${LLM_MODELO:-gpt-4o-mini}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-20}
+    depends_on: [recuperacao]
+
+volumes:
+  dados:
